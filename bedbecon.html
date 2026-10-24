@@ -1,0 +1,99 @@
+from flask import Flask, render_template, request, redirect, url_for, flash
+import sqlite3, os
+from datetime import datetime
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "change-this-for-local-demo")
+DB_PATH = os.path.join(os.path.dirname(__file__), "bedbeacon.db")
+ADMIN_PIN = os.environ.get("ADMIN_PIN", "1234") # Demo only. Set a stronger value before sharing.
+
+def db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    with db() as con:
+        con.execute("""CREATE TABLE IF NOT EXISTS hospitals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL, area TEXT NOT NULL, address TEXT NOT NULL,
+            phone TEXT NOT NULL, category TEXT NOT NULL,
+            available INTEGER NOT NULL DEFAULT 0, total INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'Unverified',
+            notes TEXT DEFAULT ''
+        )""")
+        count = con.execute("SELECT COUNT(*) FROM hospitals").fetchone()[0]
+        if count == 0:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M")
+            # Fictional sample data for demonstration only; do not use for real medical decisions.
+            samples = [
+                ("Demo City General Hospital", "Central", "Demo Road, Central Area", "080-0000-0001", "General", 4, 20, now, "Demo data", "Fictional sample record"),
+                ("Sample Heart & Care Centre", "North", "Sample Avenue, North Area", "080-0000-0002", "ICU", 2, 8, now, "Demo data", "Fictional sample record"),
+                ("Example Mother & Child Hospital", "South", "Example Street, South Area", "080-0000-0003", "Maternity", 3, 12, now, "Demo data", "Fictional sample record"),
+                ("Practice Emergency Hospital", "East", "Practice Layout, East Area", "080-0000-0004", "Emergency", 1, 6, now, "Demo data", "Fictional sample record"),
+                ("Prototype Medical Centre", "West", "Prototype Circle, West Area", "080-0000-0005", "General", 0, 15, now, "Demo data", "Fictional sample record"),
+            ]
+            con.executemany("""INSERT INTO hospitals
+                (name,area,address,phone,category,available,total,updated_at,status,notes)
+                VALUES (?,?,?,?,?,?,?,?,?,?)""", samples)
+
+@app.route("/")
+def index():
+    area = request.args.get("area", "").strip()
+    category = request.args.get("category", "").strip()
+    q = request.args.get("q", "").strip()
+    sql = "SELECT * FROM hospitals WHERE 1=1"
+    args = []
+    if area:
+        sql += " AND area = ?"; args.append(area)
+    if category:
+        sql += " AND category = ?"; args.append(category)
+    if q:
+        sql += " AND (name LIKE ? OR address LIKE ? OR area LIKE ?)"
+        args.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+    sql += " ORDER BY CASE WHEN available > 0 THEN 0 ELSE 1 END, name"
+    with db() as con:
+        hospitals = con.execute(sql, args).fetchall()
+        areas = [r["area"] for r in con.execute("SELECT DISTINCT area FROM hospitals ORDER BY area")]
+        categories = [r["category"] for r in con.execute("SELECT DISTINCT category FROM hospitals ORDER BY category")]
+    return render_template("index.html", hospitals=hospitals, areas=areas, categories=categories,
+                           selected_area=area, selected_category=category, q=q,
+                           now=datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    if request.method == "POST":
+        pin = request.form.get("pin", "")
+        if pin != ADMIN_PIN:
+            flash("Incorrect demo PIN.", "error")
+            return redirect(url_for("admin"))
+        try:
+            hospital_id = int(request.form["hospital_id"])
+            available = max(0, int(request.form["available"]))
+            status = request.form["status"]
+            notes = request.form.get("notes", "").strip()[:250]
+            if status not in ("Unverified", "Phone confirmed", "Staff updated"):
+                raise ValueError("Invalid status")
+            with db() as con:
+                row = con.execute("SELECT total FROM hospitals WHERE id=?", (hospital_id,)).fetchone()
+                if row is None:
+                    raise ValueError("Hospital not found")
+                available = min(available, row["total"])
+                con.execute("""UPDATE hospitals SET available=?, status=?, notes=?, updated_at=?
+                               WHERE id=?""",
+                            (available, status, notes, datetime.now().strftime("%Y-%m-%d %H:%M"), hospital_id))
+            flash("Demo record updated. Confirm directly with the hospital in real use.", "success")
+        except (ValueError, KeyError):
+            flash("Please enter valid values.", "error")
+        return redirect(url_for("admin"))
+    with db() as con:
+        hospitals = con.execute("SELECT * FROM hospitals ORDER BY name").fetchall()
+    return render_template("admin.html", hospitals=hospitals)
+
+@app.route("/health")
+def health():
+    return {"status": "ok"}
+
+init_db()
+if __name__ == "__main__":
+    app.run(debug=True)
